@@ -20,7 +20,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -36,11 +36,12 @@ import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -54,7 +55,6 @@ import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
-import java.net.InetAddress
 import java.net.URL
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -64,32 +64,43 @@ data class LogEntry(val timestamp: String, val message: String, val isError: Boo
 data class ChatMessage(val content: String, val isUser: Boolean, val timestamp: String = getCurrentTimestamp())
 
 class MainActivity : ComponentActivity() {
+    private lateinit var serviceDiscoveryManager: ServiceDiscoveryManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        serviceDiscoveryManager = ServiceDiscoveryManager(this)
+
         setContent {
             BasicAppTheme {
-                AppContent()
+                AppContent(serviceDiscoveryManager)
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        serviceDiscoveryManager.stopDiscovery()
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppContent() {
+fun AppContent(serviceDiscoveryManager: ServiceDiscoveryManager) {
     val selectedTabIndex = remember { mutableIntStateOf(0) }
-    val tabs = listOf("Connect", "Chat", "Logs")
+    val tabs = listOf("Services", "Chat", "Logs")
 
-    // Shared state across tabs
+    val discoveredServices by serviceDiscoveryManager.discoveredServices.collectAsState()
     val logs = remember { mutableStateListOf<LogEntry>() }
-    val ipAddress = remember { mutableStateOf("192.168.1.147") }
-    val port = remember { mutableStateOf("5000") }
     val isConnected = remember { mutableStateOf(false) }
     val connectionInProgress = remember { mutableStateOf(false) }
     val chatMessages = remember { mutableStateListOf<ChatMessage>() }
+    val selectedService = remember { mutableStateOf<DiscoveredService?>(null) }
+
+    LaunchedEffect(Unit) {
+        serviceDiscoveryManager.startDiscovery()
+    }
 
     Scaffold(
         topBar = {
@@ -118,21 +129,20 @@ fun AppContent() {
             }
 
             when (selectedTabIndex.intValue) {
-                0 -> ConnectScreen(
-                    ipAddress = ipAddress.value,
-                    port = port.value,
+                0 -> ServicesScreen(
+                    services = discoveredServices,
+                    selectedService = selectedService.value,
                     isConnected = isConnected.value,
                     connectionInProgress = connectionInProgress.value,
-                    onIpChanged = { ipAddress.value = it },
-                    onPortChanged = { port.value = it },
-                    onConnectClick = { ip, port ->
+                    onServiceSelected = { service ->
+                        selectedService.value = service
                         connectionInProgress.value = true
-                        checkConnection(ip, port) { result, message ->
+                        checkConnection(service.host, service.port.toString()) { result, message ->
                             connectionInProgress.value = false
                             isConnected.value = result
                             val timestamp = getCurrentTimestamp()
                             if (result) {
-                                logs.add(LogEntry(timestamp, "Successfully connected to $ip:$port"))
+                                logs.add(LogEntry(timestamp, "Successfully connected to ${service.host}:${service.port}"))
                             } else {
                                 logs.add(LogEntry(timestamp, "Connection failed: $message", true))
                             }
@@ -142,33 +152,33 @@ fun AppContent() {
                 1 -> ChatScreen(
                     messages = chatMessages,
                     isConnected = isConnected.value,
-                    serverUrl = "http://${ipAddress.value}:${port.value}",
                     onMessageSent = { message ->
                         val userMessage = ChatMessage(message, true)
                         chatMessages.add(userMessage)
                         logs.add(LogEntry(getCurrentTimestamp(), "Sent message: $message"))
 
-                        // Send to server and handle streaming response
-                        streamResponse(
-                            message = message,
-                            serverUrl = "http://${ipAddress.value}:${port.value}",
-                            onStreamStart = {
-                                chatMessages.add(ChatMessage("", false))
-                            },
-                            onStreamUpdate = { partialResponse ->
-                                val lastIndex = chatMessages.size - 1
-                                if (lastIndex >= 0 && !chatMessages[lastIndex].isUser) {
-                                    val updatedMessage = chatMessages[lastIndex].copy(content = partialResponse)
-                                    chatMessages[lastIndex] = updatedMessage
+                        selectedService.value?.let { service ->
+                            streamResponse(
+                                message = message,
+                                serverUrl = "http://${service.host}:${service.port}",
+                                onStreamStart = {
+                                    chatMessages.add(ChatMessage("", false))
+                                },
+                                onStreamUpdate = { partialResponse ->
+                                    val lastIndex = chatMessages.size - 1
+                                    if (lastIndex >= 0 && !chatMessages[lastIndex].isUser) {
+                                        val updatedMessage = chatMessages[lastIndex].copy(content = partialResponse)
+                                        chatMessages[lastIndex] = updatedMessage
+                                    }
+                                },
+                                onStreamComplete = {
+                                    logs.add(LogEntry(getCurrentTimestamp(), "Received complete response"))
+                                },
+                                onError = { error ->
+                                    logs.add(LogEntry(getCurrentTimestamp(), "Error: $error", true))
                                 }
-                            },
-                            onStreamComplete = {
-                                logs.add(LogEntry(getCurrentTimestamp(), "Received complete response"))
-                            },
-                            onError = { error ->
-                                logs.add(LogEntry(getCurrentTimestamp(), "Error: $error", true))
-                            }
-                        )
+                            )
+                        }
                     }
                 )
                 2 -> LogsScreen(logs = logs)
@@ -178,14 +188,12 @@ fun AppContent() {
 }
 
 @Composable
-fun ConnectScreen(
-    ipAddress: String,
-    port: String,
+fun ServicesScreen(
+    services: List<DiscoveredService>,
+    selectedService: DiscoveredService?,
     isConnected: Boolean,
     connectionInProgress: Boolean,
-    onIpChanged: (String) -> Unit,
-    onPortChanged: (String) -> Unit,
-    onConnectClick: (String, String) -> Unit
+    onServiceSelected: (DiscoveredService) -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -195,57 +203,84 @@ fun ConnectScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Text(
-            text = "Connect to Local AI Server",
+            text = "Available Services",
             style = MaterialTheme.typography.headlineSmall
         )
 
-        OutlinedTextField(
-            value = ipAddress,
-            onValueChange = onIpChanged,
-            label = { Text("IP Address") },
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        OutlinedTextField(
-            value = port,
-            onValueChange = onPortChanged,
-            label = { Text("Port") },
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Button(
-            onClick = { onConnectClick(ipAddress, port) },
-            enabled = !connectionInProgress,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            if (connectionInProgress) {
-                CircularProgressIndicator(
-                    modifier = Modifier.padding(end = 8.dp),
-                    strokeWidth = 2.dp
-                )
-            }
-            Text(if (isConnected) "Reconnect" else "Connect")
-        }
-
-        if (isConnected) {
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 16.dp)
+        if (services.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxSize(),
+                contentAlignment = Alignment.Center
             ) {
-                Column(
-                    modifier = Modifier.padding(16.dp)
-                ) {
-                    Text(
-                        text = "✅ Connected",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "Server at $ipAddress:$port is reachable",
-                        style = MaterialTheme.typography.bodyMedium
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator()
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Text("Searching for services...")
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(services) { service ->
+                    ServiceItem(
+                        service = service,
+                        isSelected = service == selectedService,
+                        isConnected = isConnected && service == selectedService,
+                        connectionInProgress = connectionInProgress && service == selectedService,
+                        onClick = { onServiceSelected(service) }
                     )
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun ServiceItem(
+    service: DiscoveredService,
+    isSelected: Boolean,
+    isConnected: Boolean,
+    connectionInProgress: Boolean,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp)
+        ) {
+            Text(
+                text = service.name,
+                style = MaterialTheme.typography.titleMedium
+            )
+            Text(
+                text = "${service.host}:${service.port}",
+                style = MaterialTheme.typography.bodyMedium
+            )
+
+            Button(
+                onClick = onClick,
+                enabled = !connectionInProgress,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp)
+            ) {
+                if (connectionInProgress) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.padding(end = 8.dp),
+                        strokeWidth = 2.dp
+                    )
+                }
+                Text(when {
+                    isConnected -> "Connected"
+                    connectionInProgress -> "Connecting..."
+                    isSelected -> "Reconnect"
+                    else -> "Connect"
+                })
             }
         }
     }
@@ -255,15 +290,12 @@ fun ConnectScreen(
 fun ChatScreen(
     messages: List<ChatMessage>,
     isConnected: Boolean,
-    serverUrl: String,
     onMessageSent: (String) -> Unit
 ) {
     val messageText = remember { mutableStateOf("") }
     val context = LocalContext.current
     val listState = rememberLazyListState()
-    val coroutineScope = rememberCoroutineScope()
 
-    // Auto-scroll to bottom when new messages arrive
     if (messages.isNotEmpty()) {
         LaunchedEffect(messages.size) {
             listState.animateScrollToItem(messages.size - 1)
@@ -275,7 +307,6 @@ fun ChatScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // Messages area
         LazyColumn(
             state = listState,
             modifier = Modifier
@@ -288,7 +319,6 @@ fun ChatScreen(
             }
         }
 
-        // Input area
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -325,7 +355,7 @@ fun ChatScreen(
                 }
             ) {
                 Icon(
-                    imageVector = Icons.Default.Send,
+                    imageVector = Icons.AutoMirrored.Filled.Send,
                     contentDescription = "Send"
                 )
             }
@@ -344,14 +374,6 @@ fun ChatScreen(
 @Composable
 fun ChatMessageItem(message: ChatMessage) {
     val alignment = if (message.isUser) Alignment.End else Alignment.Start
-    val backgroundColor = if (message.isUser)
-        MaterialTheme.colorScheme.primaryContainer
-    else
-        MaterialTheme.colorScheme.secondaryContainer
-    val textColor = if (message.isUser)
-        MaterialTheme.colorScheme.onPrimaryContainer
-    else
-        MaterialTheme.colorScheme.onSecondaryContainer
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -365,7 +387,10 @@ fun ChatMessageItem(message: ChatMessage) {
             ) {
                 Text(
                     text = message.content,
-                    color = textColor
+                    color = if (message.isUser)
+                        MaterialTheme.colorScheme.onPrimaryContainer
+                    else
+                        MaterialTheme.colorScheme.onSecondaryContainer
                 )
                 Text(
                     text = message.timestamp,
@@ -410,11 +435,6 @@ fun LogsScreen(logs: List<LogEntry>) {
 
 @Composable
 fun LogEntryItem(log: LogEntry) {
-    val textColor = if (log.isError)
-        MaterialTheme.colorScheme.error
-    else
-        MaterialTheme.colorScheme.onSurface
-
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -425,7 +445,10 @@ fun LogEntryItem(log: LogEntry) {
         ) {
             Text(
                 text = log.message,
-                color = textColor
+                color = if (log.isError)
+                    MaterialTheme.colorScheme.error
+                else
+                    MaterialTheme.colorScheme.onSurface
             )
             Text(
                 text = log.timestamp,
@@ -435,7 +458,6 @@ fun LogEntryItem(log: LogEntry) {
     }
 }
 
-// Utility functions
 fun getCurrentTimestamp(): String {
     val sdf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     return sdf.format(Date())
@@ -484,14 +506,8 @@ fun checkConnection(ip: String, port: String, callback: (Boolean, String) -> Uni
                 connection.disconnect()
 
             } catch (e: Exception) {
-                val reachable = InetAddress.getByName(ip).isReachable(3000)
-
                 withContext(Dispatchers.Main) {
-                    if (reachable) {
-                        callback(false, "IP is reachable but service isn't available: ${e.message}")
-                    } else {
-                        callback(false, "Server is not reachable: ${e.message}")
-                    }
+                    callback(false, "Connection error: ${e.message ?: "Unknown error"}")
                 }
             }
 
@@ -524,7 +540,6 @@ fun streamResponse(
             connection.setRequestProperty("Content-Type", "application/json")
             connection.setRequestProperty("Accept", "application/json")
 
-            // Log the request body
             val requestBody = "{\"message\":\"${message.replace("\"", "\\\"").replace("\n", "\\n")}\"}"
             println("Request Body: $requestBody")
 
@@ -543,7 +558,7 @@ fun streamResponse(
             val reader = BufferedReader(InputStreamReader(connection.inputStream))
             var accumulatedResponse = ""
             var lastUpdateTime = System.currentTimeMillis()
-            val updateInterval = 300L  // Update UI at most every 300 milliseconds
+            val updateInterval = 300L
 
             var line: String?
             while (reader.readLine().also { line = it } != null) {
@@ -555,16 +570,10 @@ fun streamResponse(
                     when (jsonObject.getString("status")) {
                         "generating" -> {
                             var partialResponse = jsonObject.getString("response")
-
-                            // Remove timestamps (assuming they are in a specific format)
                             partialResponse = partialResponse.replace(Regex("\\d{2}:\\d{2}:\\d{2}"), "")
-
-                            // Add spaces between concatenated words
                             partialResponse = insertSpacesBetweenWords(partialResponse)
-
                             accumulatedResponse += partialResponse
 
-                            // Debounce updates to avoid overwhelming the UI
                             if (System.currentTimeMillis() - lastUpdateTime >= updateInterval) {
                                 withContext(Dispatchers.Main) {
                                     onStreamUpdate(accumulatedResponse)
@@ -573,7 +582,6 @@ fun streamResponse(
                             }
                         }
                         "complete" -> {
-                            // Ensure final update is sent
                             withContext(Dispatchers.Main) {
                                 onStreamUpdate(accumulatedResponse)
                                 onStreamComplete()
@@ -617,17 +625,9 @@ fun streamResponse(
 }
 
 fun insertSpacesBetweenWords(text: String): String {
-    // Insert space before a capital letter that follows a lowercase letter
     var formattedText = text.replace(Regex("(?<=[a-z])(?=[A-Z])"), " ")
-
-    // Insert space before a lowercase letter that follows a digit
     formattedText = formattedText.replace(Regex("(?<=\\d)(?=[a-zA-Z])"), " ")
-
-    // Insert space when two words are unintentionally concatenated without spacing
     formattedText = formattedText.replace(Regex("(?<=[a-zA-Z])(?=[A-Z])"), " ")
-
-    // Ensure spacing around punctuation marks like commas and periods
     formattedText = formattedText.replace(Regex("([,.!?])(?=[A-Za-z])"), "$1 ")
-
     return formattedText
 }
