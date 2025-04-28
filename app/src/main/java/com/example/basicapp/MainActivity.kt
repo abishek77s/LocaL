@@ -538,7 +538,7 @@ fun checkConnection(ip: String, port: String, callback: (Boolean, String) -> Uni
 
                     withContext(Dispatchers.Main) {
                         if (serverStatus == "healthy") {
-                            callback(true, "Connected successfully to AI server")
+                            callback(true, "Connected successfully to AI Server")
                         } else {
                             callback(false, "Server is not healthy: $responseData")
                         }
