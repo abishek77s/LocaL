@@ -21,6 +21,8 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CenterAlignedTopAppBar
@@ -42,6 +44,7 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -95,12 +98,11 @@ fun AppContent(serviceDiscoveryManager: ServiceDiscoveryManager) {
     val logs = remember { mutableStateListOf<LogEntry>() }
     val isConnected = remember { mutableStateOf(false) }
     val connectionInProgress = remember { mutableStateOf(false) }
+    val isDiscoveryActive = remember { mutableStateOf(false) }
     val chatMessages = remember { mutableStateListOf<ChatMessage>() }
     val selectedService = remember { mutableStateOf<DiscoveredService?>(null) }
-
-    LaunchedEffect(Unit) {
-        serviceDiscoveryManager.startDiscovery()
-    }
+    val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     Scaffold(
         topBar = {
@@ -134,6 +136,21 @@ fun AppContent(serviceDiscoveryManager: ServiceDiscoveryManager) {
                     selectedService = selectedService.value,
                     isConnected = isConnected.value,
                     connectionInProgress = connectionInProgress.value,
+                    isDiscoveryActive = isDiscoveryActive.value,
+                    onStartDiscovery = {
+                        coroutineScope.launch {
+                            isDiscoveryActive.value = true
+                            logs.add(LogEntry(getCurrentTimestamp(), "Started service discovery"))
+                            Toast.makeText(context, "Searching for services...", Toast.LENGTH_SHORT).show()
+                            serviceDiscoveryManager.startDiscovery()
+                        }
+                    },
+                    onStopDiscovery = {
+                        isDiscoveryActive.value = false
+                        serviceDiscoveryManager.stopDiscovery()
+                        logs.add(LogEntry(getCurrentTimestamp(), "Stopped service discovery"))
+                        Toast.makeText(context, "Service discovery stopped", Toast.LENGTH_SHORT).show()
+                    },
                     onServiceSelected = { service ->
                         selectedService.value = service
                         connectionInProgress.value = true
@@ -193,6 +210,9 @@ fun ServicesScreen(
     selectedService: DiscoveredService?,
     isConnected: Boolean,
     connectionInProgress: Boolean,
+    isDiscoveryActive: Boolean,
+    onStartDiscovery: () -> Unit,
+    onStopDiscovery: () -> Unit,
     onServiceSelected: (DiscoveredService) -> Unit
 ) {
     Column(
@@ -207,15 +227,40 @@ fun ServicesScreen(
             style = MaterialTheme.typography.headlineSmall
         )
 
+        // Discovery control button
+        Button(
+            onClick = {
+                if (isDiscoveryActive) onStopDiscovery() else onStartDiscovery()
+            },
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (isDiscoveryActive) {
+                    Icon(Icons.Default.Close, contentDescription = "Stop Discovery")
+                    Text("Stop Discovery")
+                } else {
+                    Icon(Icons.Default.Search, contentDescription = "Start Discovery")
+                    Text("Start Discovery")
+                }
+            }
+        }
+
         if (services.isEmpty()) {
             Box(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    CircularProgressIndicator()
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text("Searching for services...")
+                    if (isDiscoveryActive) {
+                        CircularProgressIndicator()
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Text("Searching for services...")
+                    } else {
+                        Text("No services found. Press Start Discovery to begin searching.")
+                    }
                 }
             }
         } else {

@@ -6,7 +6,6 @@ import android.net.nsd.NsdServiceInfo
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.net.InetAddress
 
 data class DiscoveredService(
     val name: String,
@@ -25,20 +24,18 @@ class ServiceDiscoveryManager(context: Context) {
         override fun onDiscoveryStarted(serviceType: String) {
             println("Discovery started for type: $serviceType")
         }
-
+        @Suppress("DEPRECATION")
         override fun onServiceFound(serviceInfo: NsdServiceInfo) {
             println("Service Found: ${serviceInfo.serviceName}")
 
             try {
-                // Create a new ResolveListener each time to avoid the deprecated method
                 val resolveListener = object : NsdManager.ResolveListener {
                     override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                         println("Resolve failed: $errorCode")
                     }
 
                     override fun onServiceResolved(resolvedServiceInfo: NsdServiceInfo) {
-                        // Use getHost() instead of the deprecated host property
-                        val hostAddress = resolvedServiceInfo.getHost()?.hostAddress ?: return
+                        val hostAddress = resolvedServiceInfo.host?.hostAddress ?: return
                         val service = DiscoveredService(
                             name = resolvedServiceInfo.serviceName,
                             host = hostAddress,
@@ -55,7 +52,7 @@ class ServiceDiscoveryManager(context: Context) {
                     }
                 }
 
-                // Use the non-deprecated resolveService method
+                @Suppress("DEPRECATION")
                 nsdManager.resolveService(serviceInfo, resolveListener)
             } catch (e: Exception) {
                 println("Failed to resolve service: ${e.message}")
@@ -94,10 +91,12 @@ class ServiceDiscoveryManager(context: Context) {
     fun startDiscovery(serviceType: String = "_http._tcp.") {
         try {
             nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
+            nsdManager.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, discoveryListener)
         } catch (e: Exception) {
             println("Failed to start discovery: ${e.message}")
         }
     }
+
 
     fun stopDiscovery() {
         try {
